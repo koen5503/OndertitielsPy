@@ -9,3 +9,4 @@ google-cloud-aiplatform>=1.38.0
 
 # HTTP client for YouTube CC
 aiohttp>=3.9.0
+websockets

@@ -12,19 +12,22 @@ Components:
 
 import asyncio
 import audioop
+import json
 import logging
 import os
 import signal
 import sys
 import threading
+from google.api_core.exceptions import Aborted
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Set
 
 import aiohttp
 import vertexai
 from vertexai.generative_models import GenerativeModel
 import pyaudio
+import websockets
 from google.cloud.speech_v2 import SpeechAsyncClient
 from google.cloud.speech_v2.types import cloud_speech
 
@@ -59,6 +62,35 @@ YOUTUBE_CAPTION_URL = os.getenv("YOUTUBE_CAPTION_URL")
 MAX_BACKOFF_SECONDS = 60
 INITIAL_BACKOFF_SECONDS = 1
 
+
+
+# ============================================================================
+# WebSocket Server (UI)
+# ============================================================================
+
+WS_CLIENTS: Set[websockets.WebSocketServerProtocol] = set()
+
+async def broadcast(message: dict):
+    """Broadcast JSON message to all connected clients."""
+    if not WS_CLIENTS:
+        return
+    data = json.dumps(message)
+    # Filter closed connections
+    to_remove = set()
+    for client in WS_CLIENTS:
+        try:
+            await client.send(data)
+        except Exception:
+            to_remove.add(client)
+    WS_CLIENTS.difference_update(to_remove)
+
+async def websocket_handler(websocket):
+    """Handle new websocket connection."""
+    WS_CLIENTS.add(websocket)
+    try:
+        await websocket.wait_closed()
+    finally:
+        WS_CLIENTS.discard(websocket)
 
 # ============================================================================
 # Logging Setup
@@ -224,6 +256,7 @@ async def stt_stream_task(
             
             # Track last sent to avoid duplicates
             last_interim_text = ""
+            sentence_id = 0
             
             async for response in await client.streaming_recognize(
                 requests=request_generator()
@@ -243,15 +276,43 @@ async def stt_stream_task(
                         )
                         
                         # For live subtitles: send ALL transcripts immediately
-                        # Only skip if current interim is prefix of last sent
-                        if transcript != last_interim_text and not last_interim_text.startswith(transcript):
+                        # Only skip if current interim is prefix of last sent, UNLESS it is final
+                        should_send = (transcript != last_interim_text and not last_interim_text.startswith(transcript)) or is_final
+                        
+                        if should_send:
                             await transcript_queue.put(transcript)
                             logger.debug(f"Transcript queued: '{transcript}'")
                             last_interim_text = transcript
+                            
+                            # UI: Broadcast original transcript with Sentence ID
+                            await broadcast({
+                                "type": "original",
+                                "text": transcript,
+                                "is_final": is_final,
+                                "id": sentence_id,
+                                "timestamp": datetime.now().isoformat()
+                            })
+                            
+                            if is_final:
+                                sentence_id += 1
+                                last_interim_text = ""  # Reset for next sentence
             
             # Reset backoff on successful session
             backoff = INITIAL_BACKOFF_SECONDS
             
+        except Aborted as e:
+            # Handle 305s limit (409 Stream duration limit reached)
+            if "5 minutes" in str(e) or "409" in str(e):
+                logger.warning("STT stream duration limit (5 mins) reached. Resetting immediately.")
+                
+                # Perform clean reset
+                backoff = INITIAL_BACKOFF_SECONDS
+                await asyncio.sleep(0.1)  # Brief pause for cleanup
+                continue
+            else:
+                # Other Aborted errors
+                logger.error(f"STT Aborted error: {e}", exc_info=True)
+
         except Exception as e:
             logger.error(f"STT stream error: {e}", exc_info=True)
             
@@ -294,30 +355,15 @@ async def refinement_task(
             except asyncio.TimeoutError:
                 continue
             
-            word_count = len(transcript.split())
-            logger.info(f"Refining transcript: '{transcript}' ({word_count} words)")
+            # Bypass Gemini for now (User request)
+            # word_count = len(transcript.split())
+            # logger.info(f"Refining transcript: '{transcript}' ({word_count} words)")
             
-            if word_count > SHORTEN_THRESHOLD:
-                logger.debug(f"Sentence exceeds {SHORTEN_THRESHOLD} words, shortening...")
-                
-                prompt = (
-                    "Herschrijf deze ondertitel beknopt in het Nederlands. "
-                    "Maximaal 10 woorden. Geef alleen de tekst.\n\n"
-                    f"{transcript}"
-                )
-                
-                try:
-                    response = await asyncio.to_thread(
-                        model.generate_content, prompt
-                    )
-                    refined = response.text.strip()
-                    logger.info(f"Refined: '{transcript}' -> '{refined}'")
-                except Exception as e:
-                    logger.error(f"Gemini error: {e}", exc_info=True)
-                    refined = transcript  # Fallback to original
-            else:
-                refined = transcript
-                logger.debug(f"No refinement needed: '{refined}'")
+            # if word_count > SHORTEN_THRESHOLD:
+            #     ... (Gemini logic commented out) ...
+            
+            refined = transcript
+            logger.debug(f"Refinement bypassed: '{refined}'")
             
             await output_queue.put(refined)
             
@@ -358,6 +404,13 @@ async def youtube_output_task(
                 payload = f"{timestamp} {text}"
                 
                 logger.info(f"OUTPUT: {payload}")
+                
+                # UI: Broadcast refined text
+                await broadcast({
+                    "type": "refined",
+                    "text": text,
+                    "timestamp": timestamp
+                })
                 
                 if YOUTUBE_CAPTION_URL:
                     try:
@@ -424,14 +477,27 @@ async def main():
     # Give audio producer time to start
     await asyncio.sleep(0.5)
     
+
+    # Start WebSocket server wrapper
+    async def start_websocket_server():
+        try:
+            logger.info("Starting WebSocket server on 0.0.0.0:8765...")
+            async with websockets.serve(websocket_handler, "0.0.0.0", 8765):
+                logger.info("WebSocket server running and listening")
+                await asyncio.Future()  # Run forever
+        except Exception as e:
+            logger.error(f"WebSocket server start failed: {e}", exc_info=True)
+
     # Start async tasks
     tasks = [
         asyncio.create_task(stt_stream_task(audio_queue, transcript_queue, shutdown_event)),
         asyncio.create_task(refinement_task(transcript_queue, output_queue, shutdown_event)),
         asyncio.create_task(youtube_output_task(output_queue, shutdown_event)),
+        asyncio.create_task(start_websocket_server()),
     ]
     
     logger.info("All tasks started, pipeline running...")
+    logger.info("Monitor UI available at: http://localhost:8765 (monitor.html)")
     
     # Wait for shutdown
     await shutdown_event.wait()

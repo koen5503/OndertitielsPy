@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="nl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OBS Ondertitels Monitor</title>
+    <style>
+        body {
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+
+        h2 {
+            margin-top: 0;
+            border-bottom: 2px solid #333;
+            padding-bottom: 10px;
+            font-weight: 300;
+            letter-spacing: 1px;
+        }
+
+        .panel {
+            background: #252525;
+            border-radius: 8px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .content {
+            flex-grow: 1;
+            overflow-y: auto;
+            font-size: 1.2em;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 4px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .interim {
+            color: #888;
+            font-style: italic;
+        }
+
+        .final {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .refined {
+            color: #4CAF50;
+            font-weight: 500;
+            background: rgba(76, 175, 80, 0.1);
+            margin-bottom: 12px;
+            padding: 12px;
+            border-left: 4px solid #4CAF50;
+        }
+
+        .timestamp {
+            font-size: 0.7em;
+            color: #666;
+            margin-right: 8px;
+            font-family: monospace;
+        }
+
+        #status {
+            position: fixed;
+            top: 10px;
+            right: 20px;
+            font-size: 0.8em;
+            color: #666;
+        }
+
+        .connected {
+            color: #4CAF50 !important;
+        }
+
+        .disconnected {
+            color: #f44336 !important;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(5px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Auto-scroll anchor */
+        #anchor-live,
+        #anchor-out {
+            height: 1px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="status" class="disconnected">● Verbinding verbroken</div>
+
+    <div class="panel">
+        <h2>📡 Output (YouTube / Gemini)</h2>
+        <div id="out-content" class="content">
+            <div id="anchor-out"></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>🎤 Live Input (Google STT)</h2>
+        <div id="live-content" class="content">
+            <div id="anchor-live"></div>
+        </div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const liveContainer = document.getElementById('live-content');
+        const outContainer = document.getElementById('out-content');
+        let socket;
+
+        function connect() {
+            socket = new WebSocket('ws://localhost:8765');
+
+            socket.onopen = () => {
+                statusEl.textContent = '● Verbonden';
+                statusEl.className = 'connected';
+                console.log('Connected');
+            };
+
+            socket.onclose = () => {
+                statusEl.textContent = '● Verbinding verbroken - Opnieuw proberen...';
+                statusEl.className = 'disconnected';
+                setTimeout(connect, 3000);
+            };
+
+            function smartScroll(container, element) {
+                // Auto-scroll only if already at bottom (tolerance 50px)
+                const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+
+                container.insertBefore(element, container.lastElementChild);
+
+                // Keep history limited
+                if (container.children.length > 50) container.firstElementChild.remove();
+
+                if (isNearBottom) {
+                    container.scrollTop = container.scrollHeight;
+                }
+            }
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const time = new Date(data.timestamp).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+                if (data.type === 'original') {
+                    // Use Sentence ID from backend to track elements uniquely
+                    const elementId = `entry-${data.id}`;
+                    let div = document.getElementById(elementId);
+
+                    if (!div) {
+                        div = document.createElement('div');
+                        div.className = 'log-entry interim';
+                        div.id = elementId;
+                        liveContainer.insertBefore(div, document.getElementById('anchor-live'));
+                    }
+
+                    if (data.is_final) {
+                        div.className = 'log-entry final';
+                    }
+
+                    div.innerHTML = `<span class="timestamp">${time}</span>${data.text}`;
+                    smartScroll(liveContainer, div);
+                }
+                else if (data.type === 'refined') {
+                    const div = document.createElement('div');
+                    div.className = 'log-entry refined';
+                    div.innerHTML = `<span class="timestamp">${time}</span>${data.text}`;
+
+                    // Output uses anchor-out
+                    smartScroll(outContainer, div);
+                }
+            };
+        }
+
+        connect();
+    </script>
+</body>
+
+</html>
