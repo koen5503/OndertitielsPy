@@ -1,0 +1,11 @@
+# OBS AI Subtitle Pipeline Dependencies
+
+# Audio capture
+pyaudio>=0.2.14
+
+# Google Cloud
+google-cloud-speech>=2.21.0
+google-cloud-aiplatform>=1.38.0
+
+# HTTP client for YouTube CC
+aiohttp>=3.9.0

@@ -1,0 +1,35 @@
+# SYSTEM PROMPT: OBS AI PIPELINE WITH ASYNC BUFFERING
+
+## Goal
+Build a Python 3.10+ script that converts live speech to concisesubtitles for YouTube CC without losing audio data.
+
+## 1. Technical Components
+- **Audio Capture:** PyAudio (Non-blocking callback mode).
+- **Communication:** asyncio.Queue for thread-safe double buffering.
+- **STT:** Google Cloud Speech-to-Text V2 (StreamingRecognize) or V3
+- **Refinement:** Gemini 1.5 Flash (Shortens sentences > 12 words).
+- **Outputs:** YouTube Caption API (HTTP POST).
+
+## 2. Concurrency Model
+- **Producer Thread:** Continuously listens to Mic and puts chunks into `audio_queue`.
+- **Stream Task:** Consumes `audio_queue`, maintains a bi-directional gRPC stream to Google. 
+- **Refinement Task:** Consumes 'is_final' transcripts and runs the LLM shortener.
+- **Output Task:** Dispatches results to YouTube concurrently.
+
+## 3. Logic for Sentence Refinement
+IF `len(translated_sentence.split()) > SHORTEN_THRESHOLD`:
+   CALL LLM with prompt: "Rewrite this subtitle to be concise. Max 10 words. Output only the text."
+ELSE:
+   USE raw translation.
+
+## 4. YouTube CC Payload
+POST to `YOUTUBE_CAPTION_URL` with:
+Header: `Content-Type: text/plain`
+Body: `[ISO-8601-Timestamp] [Refined_Text]`
+
+
+## 5. Error Handling
+- Use `asyncio.gather` for outputs to ensure one slow API doesn't block the others.
+- Implement exponential backoff for Google Cloud stream reconnections.
+
+## 6. Generous logging is appreciated
