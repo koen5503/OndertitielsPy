@@ -12,11 +12,64 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             margin: 0;
             padding: 20px;
+            padding-top: 60px;
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 1fr 1fr 1fr;
             gap: 20px;
             height: 100vh;
             box-sizing: border-box;
+        }
+
+        /* Top bar with pause button and status */
+        .top-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 50px;
+            background: #252525;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+            z-index: 100;
+        }
+
+        #pause-btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            font-size: 1em;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        #pause-btn:hover {
+            background: #45a049;
+        }
+
+        #pause-btn.paused {
+            background: #f44336;
+        }
+
+        #pause-btn.paused:hover {
+            background: #da190b;
+        }
+
+        #status {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .connected {
+            color: #4CAF50 !important;
+        }
+
+        .disconnected {
+            color: #f44336 !important;
         }
 
         h2 {
@@ -26,6 +79,9 @@
             font-weight: 300;
             letter-spacing: 1px;
             flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
         .panel {
@@ -44,7 +100,6 @@
             font-size: 1.2em;
             line-height: 1.5;
             white-space: pre-wrap;
-            /* Custom scrollbar */
             scrollbar-width: thin;
             scrollbar-color: #555 #252525;
         }
@@ -84,15 +139,6 @@
             background: rgba(255, 255, 255, 0.05);
         }
 
-        .refined {
-            color: #4CAF50;
-            font-weight: 500;
-            background: rgba(76, 175, 80, 0.1);
-            margin-bottom: 12px;
-            padding: 12px;
-            border-left: 4px solid #4CAF50;
-        }
-
         .translated {
             color: #2196F3;
             font-weight: 500;
@@ -102,6 +148,15 @@
             border-left: 4px solid #2196F3;
         }
 
+        .translated2 {
+            color: #FF9800;
+            font-weight: 500;
+            background: rgba(255, 152, 0, 0.1);
+            margin-bottom: 12px;
+            padding: 12px;
+            border-left: 4px solid #FF9800;
+        }
+
         .timestamp {
             font-size: 0.7em;
             color: #666;
@@ -109,20 +164,14 @@
             font-family: monospace;
         }
 
-        #status {
-            position: fixed;
-            top: 10px;
-            right: 20px;
-            font-size: 0.8em;
-            color: #666;
-        }
-
-        .connected {
-            color: #4CAF50 !important;
-        }
-
-        .disconnected {
-            color: #f44336 !important;
+        #lang-select {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 4px 8px;
+            font-size: 0.9em;
+            border-radius: 4px;
+            cursor: pointer;
         }
 
         @keyframes fadeIn {
@@ -137,36 +186,61 @@
             }
         }
 
-        /* Auto-scroll anchor */
         #anchor-out,
-        #anchor-trans {
+        #anchor-trans,
+        #anchor-lang2 {
             height: 1px;
         }
     </style>
 </head>
 
 <body>
-    <div id="status" class="disconnected">● Verbinding verbroken</div>
+    <div class="top-bar">
+        <button id="pause-btn">⏸ Pause</button>
+        <div id="status" class="disconnected">● Verbinding verbroken</div>
+    </div>
 
     <div class="panel">
-        <h2>📡 Output (Nederlands)</h2>
+        <h2>📡 Output (NL)</h2>
         <div id="out-content" class="content">
             <div id="anchor-out"></div>
         </div>
     </div>
 
     <div class="panel">
-        <h2>🌍 Translated (EN)</h2>
+        <h2>🌍 English</h2>
         <div id="trans-content" class="content">
             <div id="anchor-trans"></div>
         </div>
     </div>
 
+    <div class="panel">
+        <h2>🌐
+            <select id="lang-select">
+                <option value="de">Deutsch</option>
+                <option value="fr">Français</option>
+                <option value="es">Español</option>
+                <option value="pt">Português</option>
+                <option value="it">Italiano</option>
+                <option value="pl">Polski</option>
+                <option value="zh">中文</option>
+                <option value="ja">日本語</option>
+            </select>
+        </h2>
+        <div id="lang2-content" class="content">
+            <div id="anchor-lang2"></div>
+        </div>
+    </div>
+
     <script>
         const statusEl = document.getElementById('status');
+        const pauseBtn = document.getElementById('pause-btn');
+        const langSelect = document.getElementById('lang-select');
         const outContainer = document.getElementById('out-content');
         const transContainer = document.getElementById('trans-content');
+        const lang2Container = document.getElementById('lang2-content');
         let socket;
+        let isPaused = false;
 
         function connect() {
             socket = new WebSocket('ws://localhost:8765');
@@ -184,14 +258,9 @@
             };
 
             function smartScroll(container, element) {
-                // Auto-scroll only if already at bottom (tolerance 100px)
                 const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-
                 container.insertBefore(element, container.lastElementChild);
-
-                // Keep history limited
                 if (container.children.length > 50) container.firstElementChild.remove();
-
                 if (isNearBottom) {
                     container.scrollTop = container.scrollHeight;
                 }
@@ -199,10 +268,23 @@
 
             socket.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+
+                // Handle status updates
+                if (data.type === 'status') {
+                    if (data.paused !== undefined) {
+                        isPaused = data.paused;
+                        pauseBtn.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+                        pauseBtn.className = isPaused ? 'paused' : '';
+                    }
+                    if (data.lang !== undefined) {
+                        langSelect.value = data.lang;
+                    }
+                    return;
+                }
+
                 const time = new Date(data.timestamp).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
                 if (data.type === 'original') {
-                    // Show original Dutch text in Output panel
                     const elementId = `entry-${data.id}`;
                     let div = document.getElementById(elementId);
 
@@ -219,7 +301,6 @@
 
                     div.innerHTML = `<span class="timestamp">${time}</span>${data.text}`;
 
-                    // Auto-scroll if near bottom
                     const isNearBottom = outContainer.scrollHeight - outContainer.scrollTop - outContainer.clientHeight < 100;
                     if (isNearBottom) {
                         outContainer.scrollTop = outContainer.scrollHeight;
@@ -229,11 +310,35 @@
                     const div = document.createElement('div');
                     div.className = 'log-entry translated';
                     div.innerHTML = `<span class="timestamp">${time}</span>${data.text}`;
-
                     smartScroll(transContainer, div);
+                }
+                else if (data.type === 'translated2') {
+                    const div = document.createElement('div');
+                    div.className = 'log-entry translated2';
+                    div.innerHTML = `<span class="timestamp">${time}</span>${data.text}`;
+                    smartScroll(lang2Container, div);
                 }
             };
         }
+
+        // Pause/Resume button
+        pauseBtn.onclick = () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: isPaused ? 'resume' : 'pause'
+                }));
+            }
+        };
+
+        // Language selection
+        langSelect.onchange = () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: 'set_language',
+                    lang: langSelect.value
+                }));
+            }
+        };
 
         connect();
     </script>

@@ -70,6 +70,20 @@ INITIAL_BACKOFF_SECONDS = 1
 # ============================================================================
 
 WS_CLIENTS: Set[websockets.WebSocketServerProtocol] = set()
+PAUSED = False  # Global pause state for STT/translation
+DYNAMIC_LANG = "de"  # Global dynamic language (shared by all clients)
+
+# Language code to full name mapping
+LANG_NAMES = {
+    "de": "German",
+    "fr": "French", 
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "it": "Italian",
+    "pl": "Polish",
+    "zh": "Chinese",
+    "ja": "Japanese",
+}
 
 async def broadcast(message: dict):
     """Broadcast JSON message to all connected clients."""
@@ -86,10 +100,37 @@ async def broadcast(message: dict):
     WS_CLIENTS.difference_update(to_remove)
 
 async def websocket_handler(websocket):
-    """Handle new websocket connection."""
+    """Handle websocket connection with bidirectional messaging."""
+    global PAUSED, DYNAMIC_LANG
     WS_CLIENTS.add(websocket)
+    
+    # Send current state to new client
+    await websocket.send(json.dumps({
+        "type": "status",
+        "paused": PAUSED,
+        "lang": DYNAMIC_LANG
+    }))
+    
     try:
-        await websocket.wait_closed()
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+                if data.get("type") == "set_language":
+                    DYNAMIC_LANG = data.get("lang", "de")
+                    logger.info(f"Dynamic language changed to: {DYNAMIC_LANG}")
+                    await broadcast({"type": "status", "lang": DYNAMIC_LANG})
+                elif data.get("type") == "pause":
+                    PAUSED = True
+                    logger.info("Pipeline PAUSED via UI")
+                    await broadcast({"type": "status", "paused": True})
+                elif data.get("type") == "resume":
+                    PAUSED = False
+                    logger.info("Pipeline RESUMED via UI")
+                    await broadcast({"type": "status", "paused": False})
+            except json.JSONDecodeError:
+                pass
+    except websockets.exceptions.ConnectionClosed:
+        pass
     finally:
         WS_CLIENTS.discard(websocket)
 
@@ -310,6 +351,10 @@ async def stt_stream_task(
                             f"'{transcript}' (conf: {confidence:.2f})"
                         )
                         
+                        # Skip broadcasts when paused (but keep STT running)
+                        if PAUSED:
+                            continue
+                        
                         # Show all interims (UI will overwrite by ID)
                         await broadcast({
                             "type": "original",
@@ -324,14 +369,28 @@ async def stt_stream_task(
                         
                         # ONLY translate when Google says final
                         if is_final:
-                            translated = await translate_text(transcript)
-                            logger.info(f"Translated: '{translated}'")
+                            # Translate to English (fixed)
+                            translated_en = await translate_text(transcript, "English")
+                            logger.info(f"Translated (EN): '{translated_en}'")
                             await broadcast({
                                 "type": "translated",
-                                "text": translated,
+                                "text": translated_en,
                                 "source_id": sentence_id,
                                 "timestamp": datetime.now().isoformat()
                             })
+                            
+                            # Translate to dynamic language
+                            target_lang = LANG_NAMES.get(DYNAMIC_LANG, "German")
+                            translated_dyn = await translate_text(transcript, target_lang)
+                            logger.info(f"Translated ({DYNAMIC_LANG}): '{translated_dyn}'")
+                            await broadcast({
+                                "type": "translated2",
+                                "text": translated_dyn,
+                                "lang": DYNAMIC_LANG,
+                                "source_id": sentence_id,
+                                "timestamp": datetime.now().isoformat()
+                            })
+                            
                             sentence_id += 1
             
             # Reset backoff on successful session
