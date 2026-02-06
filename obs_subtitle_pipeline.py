@@ -81,6 +81,8 @@ LANG_NAMES = {
     "pt": "Portuguese",
     "it": "Italian",
     "pl": "Polish",
+    "ru": "Russian",
+    "uk": "Ukrainian",
     "zh": "Chinese",
     "ja": "Japanese",
 }
