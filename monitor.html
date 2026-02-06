@@ -25,6 +25,7 @@
             padding-bottom: 10px;
             font-weight: 300;
             letter-spacing: 1px;
+            flex-shrink: 0;
         }
 
         .panel {
@@ -34,14 +35,36 @@
             display: flex;
             flex-direction: column;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
         }
 
         .content {
             flex-grow: 1;
-            overflow-y: auto;
+            overflow-y: scroll;
             font-size: 1.2em;
             line-height: 1.5;
             white-space: pre-wrap;
+            /* Custom scrollbar */
+            scrollbar-width: thin;
+            scrollbar-color: #555 #252525;
+        }
+
+        .content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .content::-webkit-scrollbar-track {
+            background: #252525;
+            border-radius: 4px;
+        }
+
+        .content::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 4px;
+        }
+
+        .content::-webkit-scrollbar-thumb:hover {
+            background: #777;
         }
 
         .log-entry {
@@ -68,6 +91,15 @@
             margin-bottom: 12px;
             padding: 12px;
             border-left: 4px solid #4CAF50;
+        }
+
+        .translated {
+            color: #2196F3;
+            font-weight: 500;
+            background: rgba(33, 150, 243, 0.1);
+            margin-bottom: 12px;
+            padding: 12px;
+            border-left: 4px solid #2196F3;
         }
 
         .timestamp {
@@ -106,8 +138,8 @@
         }
 
         /* Auto-scroll anchor */
-        #anchor-live,
-        #anchor-out {
+        #anchor-out,
+        #anchor-trans {
             height: 1px;
         }
     </style>
@@ -117,23 +149,23 @@
     <div id="status" class="disconnected">● Verbinding verbroken</div>
 
     <div class="panel">
-        <h2>📡 Output (YouTube / Gemini)</h2>
+        <h2>📡 Output (Nederlands)</h2>
         <div id="out-content" class="content">
             <div id="anchor-out"></div>
         </div>
     </div>
 
     <div class="panel">
-        <h2>🎤 Live Input (Google STT)</h2>
-        <div id="live-content" class="content">
-            <div id="anchor-live"></div>
+        <h2>🌍 Translated (EN)</h2>
+        <div id="trans-content" class="content">
+            <div id="anchor-trans"></div>
         </div>
     </div>
 
     <script>
         const statusEl = document.getElementById('status');
-        const liveContainer = document.getElementById('live-content');
         const outContainer = document.getElementById('out-content');
+        const transContainer = document.getElementById('trans-content');
         let socket;
 
         function connect() {
@@ -152,7 +184,7 @@
             };
 
             function smartScroll(container, element) {
-                // Auto-scroll only if already at bottom (tolerance 50px)
+                // Auto-scroll only if already at bottom (tolerance 100px)
                 const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
 
                 container.insertBefore(element, container.lastElementChild);
@@ -170,7 +202,7 @@
                 const time = new Date(data.timestamp).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
                 if (data.type === 'original') {
-                    // Use Sentence ID from backend to track elements uniquely
+                    // Show original Dutch text in Output panel
                     const elementId = `entry-${data.id}`;
                     let div = document.getElementById(elementId);
 
@@ -178,7 +210,7 @@
                         div = document.createElement('div');
                         div.className = 'log-entry interim';
                         div.id = elementId;
-                        liveContainer.insertBefore(div, document.getElementById('anchor-live'));
+                        outContainer.insertBefore(div, document.getElementById('anchor-out'));
                     }
 
                     if (data.is_final) {
@@ -186,15 +218,19 @@
                     }
 
                     div.innerHTML = `<span class="timestamp">${time}</span>${data.text}`;
-                    smartScroll(liveContainer, div);
+
+                    // Auto-scroll if near bottom
+                    const isNearBottom = outContainer.scrollHeight - outContainer.scrollTop - outContainer.clientHeight < 100;
+                    if (isNearBottom) {
+                        outContainer.scrollTop = outContainer.scrollHeight;
+                    }
                 }
-                else if (data.type === 'refined') {
+                else if (data.type === 'translated') {
                     const div = document.createElement('div');
-                    div.className = 'log-entry refined';
+                    div.className = 'log-entry translated';
                     div.innerHTML = `<span class="timestamp">${time}</span>${data.text}`;
 
-                    // Output uses anchor-out
-                    smartScroll(outContainer, div);
+                    smartScroll(transContainer, div);
                 }
             };
         }

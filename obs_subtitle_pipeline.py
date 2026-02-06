@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 from google.api_core.exceptions import Aborted
+from google.protobuf import duration_pb2
 import time
 from datetime import datetime, timezone
 from typing import Optional, Set
@@ -37,7 +38,7 @@ from google.cloud.speech_v2.types import cloud_speech
 
 # Audio settings
 SAMPLE_RATE = 16000
-CHUNK_SIZE = 1600  # 100ms chunks at 16kHz
+CHUNK_SIZE = 1600  # 100ms chunks at 16kHz (3200 bytes at 16-bit, max is 25600)
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 MIN_RMS_THRESHOLD = int(os.getenv("AUDIO_RMS_THRESHOLD", 150))  # Ignore silence < 150 RMS
@@ -114,12 +115,18 @@ logger = logging.getLogger("OBS-Subtitle")
 class AudioProducer:
     """Non-blocking audio capture using PyAudio callback mode."""
     
+    # Silence stretcher settings
+    SILENCE_STRETCH_THRESHOLD_MS = 200   # Detect silence after 200ms (2 chunks)
+    SILENCE_STRETCH_DURATION_MS = 1500   # Stretch to 1.5 seconds total
+    
     def __init__(self, audio_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         self.audio_queue = audio_queue
         self.loop = loop
         self.running = False
         self.pyaudio_instance: Optional[pyaudio.PyAudio] = None
         self.stream: Optional[pyaudio.Stream] = None
+        self.silence_start_time = None  # Track when silence started
+        self.already_stretched = False   # Prevent multiple stretches per pause
         logger.info("AudioProducer initialized")
     
     def _audio_callback(self, in_data, frame_count, time_info, status):
@@ -130,15 +137,41 @@ class AudioProducer:
         if self.running:
             # Calculate RMS amplitude
             rms = audioop.rms(in_data, 2)
+            silence_chunk = bytes(len(in_data))
             
             if rms < MIN_RMS_THRESHOLD:
-                # Silence - send zero bytes to keep stream alive but filter noise
-                # This prevents "409 Stream timed out" from Google
-                silence_chunk = bytes(len(in_data))
+                # Track silence duration
+                if self.silence_start_time is None:
+                    self.silence_start_time = time.time()
+                
+                silence_duration_ms = (time.time() - self.silence_start_time) * 1000
+                
+                # Check if we should stretch this silence
+                if silence_duration_ms >= self.SILENCE_STRETCH_THRESHOLD_MS and not self.already_stretched:
+                    # Calculate extra silent chunks needed
+                    chunk_duration_ms = (CHUNK_SIZE / SAMPLE_RATE) * 1000  # ~100ms per chunk
+                    extra_ms_needed = self.SILENCE_STRETCH_DURATION_MS - silence_duration_ms
+                    extra_chunks = max(0, int(extra_ms_needed / chunk_duration_ms))
+                    
+                    logger.debug(f"Silence stretch triggered: {silence_duration_ms:.0f}ms detected, adding {extra_chunks} extra chunks")
+                    
+                    # Send extra silence chunks to force Google's VAD
+                    for _ in range(extra_chunks):
+                        asyncio.run_coroutine_threadsafe(
+                            self.audio_queue.put(silence_chunk), self.loop
+                        )
+                    
+                    self.already_stretched = True  # Prevent multiple stretches
+                
+                # Always send silence to keep stream alive
                 asyncio.run_coroutine_threadsafe(
                     self.audio_queue.put(silence_chunk), self.loop
                 )
                 return (None, pyaudio.paContinue)
+            
+            # Speech detected - reset silence tracker
+            self.silence_start_time = None
+            self.already_stretched = False
             
             # Thread-safe put to asyncio queue
             asyncio.run_coroutine_threadsafe(
@@ -223,7 +256,7 @@ async def stt_stream_task(
                     audio_channel_count=CHANNELS,
                 ),
                 language_codes=[STT_LANGUAGE_CODE],
-                model="long",
+                model="latest_long",
                 features=cloud_speech.RecognitionFeatures(
                     enable_automatic_punctuation=True,
                 ),
@@ -254,15 +287,17 @@ async def stt_stream_task(
             logger.info("Starting STT streaming session...")
             print("🎤 STT verbonden - wacht op spraak...")
             
-            # Track last sent to avoid duplicates
-            last_interim_text = ""
+            # Simple ID-based tracking
             sentence_id = 0
             
             async for response in await client.streaming_recognize(
                 requests=request_generator()
             ):
-                for result in response.results:
-                    if result.alternatives:
+                # Only process first result to avoid duplicates
+                if not response.results:
+                    continue
+                result = response.results[0]
+                if result.alternatives:
                         transcript = result.alternatives[0].transcript.strip()
                         is_final = result.is_final
                         confidence = result.alternatives[0].confidence if is_final else 0
@@ -275,27 +310,29 @@ async def stt_stream_task(
                             f"'{transcript}' (conf: {confidence:.2f})"
                         )
                         
-                        # For live subtitles: send ALL transcripts immediately
-                        # Only skip if current interim is prefix of last sent, UNLESS it is final
-                        should_send = (transcript != last_interim_text and not last_interim_text.startswith(transcript)) or is_final
+                        # Show all interims (UI will overwrite by ID)
+                        await broadcast({
+                            "type": "original",
+                            "text": transcript,
+                            "is_final": is_final,
+                            "id": sentence_id,
+                            "timestamp": datetime.now().isoformat()
+                        })
                         
-                        if should_send:
-                            await transcript_queue.put(transcript)
-                            logger.debug(f"Transcript queued: '{transcript}'")
-                            last_interim_text = transcript
-                            
-                            # UI: Broadcast original transcript with Sentence ID
+                        # Queue for other tasks
+                        await transcript_queue.put(transcript)
+                        
+                        # ONLY translate when Google says final
+                        if is_final:
+                            translated = await translate_text(transcript)
+                            logger.info(f"Translated: '{translated}'")
                             await broadcast({
-                                "type": "original",
-                                "text": transcript,
-                                "is_final": is_final,
-                                "id": sentence_id,
+                                "type": "translated",
+                                "text": translated,
+                                "source_id": sentence_id,
                                 "timestamp": datetime.now().isoformat()
                             })
-                            
-                            if is_final:
-                                sentence_id += 1
-                                last_interim_text = ""  # Reset for next sentence
+                            sentence_id += 1
             
             # Reset backoff on successful session
             backoff = INITIAL_BACKOFF_SECONDS
@@ -324,6 +361,32 @@ async def stt_stream_task(
             backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
     
     logger.info("STT Stream Task stopped")
+
+
+# ============================================================================
+# Translation Helper (Gemini)
+# ============================================================================
+
+# Global model for translation (initialized lazily)
+_translation_model = None
+
+async def translate_text(text: str, target_lang: str = "English") -> str:
+    """Translate text using Gemini."""
+    global _translation_model
+    
+    if _translation_model is None:
+        vertexai.init(project=GOOGLE_PROJECT_ID, location=GOOGLE_LOCATION)
+        _translation_model = GenerativeModel("gemini-2.0-flash-001")
+    
+    try:
+        prompt = f"Translate the following text to {target_lang}. Only output the translation, nothing else:\n\n{text}"
+        response = await asyncio.to_thread(
+            _translation_model.generate_content, prompt
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        return f"[Translation failed: {text}]"
 
 
 # ============================================================================
@@ -405,12 +468,12 @@ async def youtube_output_task(
                 
                 logger.info(f"OUTPUT: {payload}")
                 
-                # UI: Broadcast refined text
-                await broadcast({
-                    "type": "refined",
-                    "text": text,
-                    "timestamp": timestamp
-                })
+                # UI: refined broadcast disabled - we already have original + translated
+                # await broadcast({
+                #     "type": "refined",
+                #     "text": text,
+                #     "timestamp": timestamp
+                # })
                 
                 if YOUTUBE_CAPTION_URL:
                     try:
