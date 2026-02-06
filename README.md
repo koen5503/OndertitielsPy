@@ -1,28 +1,22 @@
-# OBS AI Subtitle Pipeline - Walkthrough
+# OBS AI Subtitle Pipeline
 
-## Wat is gebouwd
+Live spraak-naar-ondertiteling pipeline met realtime vertaling.
 
-Live spraak-naar-ondertiteling pipeline met:
+## Features
 
 - **PyAudio** non-blocking audio capture
-- **Google Cloud STT V2** real-time speech-to-text
-- **Gemini 2.0 Flash** (via Vertex AI) voor zinsverkorting (>12 woorden → max 10)
-- **YouTube Caption API** output (logging tot URL ingesteld)
-
-## Wijzigingen sessie
-
-| Probleem | Oplossing |
-|----------|-----------|
-| FINAL transcripts kwamen niet door | Alle interim en final transcripts direct doorsturen |
-| Gemini model niet gevonden | Ge-update naar `gemini-2.0-flash-001` |
-| Gemini output was Engels | Prompt aangepast naar Nederlands |
-| Variable scope bug | Tracking variabelen buiten loop geplaatst |
+- **Google Cloud STT V2** real-time speech-to-text (Nederlands)
+- **Gemini 2.0 Flash** voor vertaling naar Engels
+- **Silence stretcher** — detecteert pauzes van 200ms en verlengt ze naar 1.5s voor snellere finalisatie
+- **WebSocket monitor** — real-time weergave van output + vertaling
+- **YouTube Caption API** output (optioneel)
 
 ## Bestanden
 
 | File | Beschrijving |
 |------|--------------|
 | [obs_subtitle_pipeline.py](obs_subtitle_pipeline.py) | Hoofd script |
+| [monitor.html](monitor.html) | WebSocket monitor UI (2 kolommen) |
 | [requirements.txt](requirements.txt) | Dependencies |
 
 ## Gebruik
@@ -38,18 +32,20 @@ export YOUTUBE_CAPTION_URL="https://..."  # Optioneel
 
 # 3. Start
 python obs_subtitle_pipeline.py
+
+# 4. Open monitor.html in browser voor live weergave
 ```
+
+## Monitor UI
+
+Open `monitor.html` in je browser na het starten van de pipeline:
+
+- **Links**: Output (Nederlands) — STT transcriptie
+- **Rechts**: Translated (EN) — Gemini vertaling
 
 ## Problemen Oplossen
 
-### "Alleen audio chunks, geen tekst"
-
-Dit betekent meestal dat de verkeerde microfoon is geselecteerd (bijv. NDI Audio zonder signaal).
-Start het script opnieuw en kies expliciet de juiste microfoon (bijv. MacBook of AirPods) in het menu.
-
 ### Audio Device Selectie overslaan
-
-Wil je niet elke keer kiezen? Zet de environment variable:
 
 ```bash
 export AUDIO_DEVICE="AirPods"  # of deel van de naam
@@ -57,22 +53,11 @@ export AUDIO_DEVICE="AirPods"  # of deel van de naam
 
 ### Gevoeligheid aanpassen
 
-Standaard worden zachte geluiden (ruis/stilte) genegeerd (RMS < 150).
-Als de microfoon te zacht is, verlaag dit getal:
+Standaard worden zachte geluiden (RMS < 150) genegeerd:
 
 ```bash
-export AUDIO_RMS_THRESHOLD="50"
+export AUDIO_RMS_THRESHOLD="50"   # Verhoog gevoeligheid
+export AUDIO_RMS_THRESHOLD="300"  # Minder ruis
 ```
 
-Als er te veel ruis doorkomt, verhoog het (bijv. 300).
-
 Stop met `Ctrl+C`.
-
-## Verificatie Resultaten
-
-- ✅ **STT**: Real-time transcripts in Nederlands
-- ✅ **Gemini**: Verkort lange zinnen in Nederlands, bv:
-  - `"Lange zin, geen pauze: kan de transcriptie het aan?"`
-  - `"Ik spreek een lange zin zonder pauze om te testen."`
-- ✅ **Output**: Timestamps + tekst klaar voor YouTube CC
-- ✅ **Graceful shutdown**: Clean exit op Ctrl+C
